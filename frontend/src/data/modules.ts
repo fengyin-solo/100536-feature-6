@@ -11,6 +11,8 @@ export const MODULES: ModuleMeta[] = [
     statuses: ["待布方", "发掘中", "已停掘", "已回填"],
     actions: ["提交布方", "登记停掘", "办理回填"],
     actionTargets: {"提交布方": "发掘中", "登记停掘": "已停掘", "办理回填": "已回填"},
+    stepwise: true,
+    actionRequires: {"办理回填": ["布方面积", "起始层位"]},
     metrics: ["发掘中探方", "待布方探方", "累计布方面积"],
   },
   {

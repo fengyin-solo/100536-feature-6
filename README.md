@@ -68,4 +68,7 @@ npm run build
 - 字段、状态、动作与流转目标集中在 `frontend/src/data/modules.ts`；示例数据在
   `frontend/src/data/seed.ts`。
 - 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
+- 探方状态只能逐段流转（待布方→发掘中→已停掘→已回填），不许跳级；办理回填前须齐备
+  布方面积与起始层位，回填办结会自动在探方验收生成一张待验收待办单；现场复测的布方面积
+  保存后即取代台账值、不再重算，复测记录留存在探方详情里。
 - 想回到初始数据：清掉浏览器里 `archaeology-field:entries` 这一项，或调用 `resetModule(模块)`。
