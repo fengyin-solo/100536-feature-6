@@ -5,6 +5,12 @@ import type { ActionResult, EntryRow, ModuleMeta, OverviewResult, PageResult } f
 // 会写进数据的「往回走」动作：命中就把这条记录标成异常态，看板上能一眼看出来。
 const NEGATIVE_ACTIONS = ['撤销', '作废', '拒绝', '驳回', '停用', '忽略', '下线', '回滚']
 
+// 办理回填时随动作一起带上来的现场复测信息：复测面积留空表示沿用台账里的布方面积。
+export type BackfillPayload = {
+  remeasuredArea?: string
+  remeasuredBy?: string
+}
+
 export function moduleMeta(key: string): ModuleMeta {
   const meta = MODULE_BY_KEY.get(key)
   if (!meta) {
@@ -34,6 +40,10 @@ export function runAction(key: string, id: number, action: string): ActionResult
   if (!target) {
     return { ok: false, message: `${meta.entity}没有登记「${action}」这个动作` }
   }
+  // 探方回填要先核对面积与层位、留存复测记录并转验收待办，走专门入口，不与普通动作混用。
+  if (key === 'trench' && action === '办理回填') {
+    return backfillTrench(id, {})
+  }
   const rows = listRows(key)
   const index = rows.findIndex((row) => Number(row.id) === id)
   if (index < 0) {
@@ -42,6 +52,13 @@ export function runAction(key: string, id: number, action: string): ActionResult
   const current = String(rows[index].status)
   if (current === target) {
     return { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` }
+  }
+  const from = meta.actionFrom?.[action]
+  if (from && current !== from) {
+    return {
+      ok: false,
+      message: `${meta.entity}当前状态是「${current}」，只能由「${from}」${action}，状态要逐段往下流转，不许跳级`,
+    }
   }
   const lastStatus = meta.statuses[meta.statuses.length - 1]
   const updated: EntryRow = {
@@ -54,6 +71,93 @@ export function runAction(key: string, id: number, action: string): ActionResult
   next[index] = updated
   saveRows(key, next)
   return { ok: true, message: `${meta.entity}已${action}，当前状态「${target}」` }
+}
+
+// 探方回填：先核对布方面积与起始层位是否齐备，面积缺失一律退回、不保存；
+// 现场复测面积优先于台账值，复测记录随探方留存，不再重算；存量探方不动，沿用老数据里的取值。
+// 回填收尾后在探方验收落一张「待验收」待办单。
+export function backfillTrench(id: number, payload: BackfillPayload): ActionResult {
+  const meta = moduleMeta('trench')
+  const rows = listRows('trench')
+  const index = rows.findIndex((row) => Number(row.id) === id)
+  if (index < 0) {
+    return { ok: false, message: `没有找到编号为 ${id} 的${meta.entity}` }
+  }
+  const row = rows[index]
+  const code = String(row['探方编号'] ?? id)
+  const current = String(row.status)
+  if (current === '已回填') {
+    return { ok: false, message: `${meta.entity}已经是「已回填」，不用重复操作` }
+  }
+  if (current !== '已停掘') {
+    return {
+      ok: false,
+      message: `探方 ${code} 当前状态是「${current}」，只能由「已停掘」办理回填，状态要逐段往下流转，不许跳级`,
+    }
+  }
+  const remeasuredArea = (payload.remeasuredArea ?? '').trim()
+  const ledgerArea = String(row['布方面积'] ?? '').trim()
+  const finalArea = remeasuredArea || ledgerArea
+  if (!finalArea) {
+    return {
+      ok: false,
+      message: `探方 ${code} 布方面积缺失，回填申请已退回，本次不保存；请先补录台账或填写现场复测面积`,
+    }
+  }
+  if (!String(row['起始层位'] ?? '').trim()) {
+    return {
+      ok: false,
+      message: `探方 ${code} 起始层位缺失，回填申请已退回，本次不保存；请先补录起始层位`,
+    }
+  }
+  const updated: EntryRow = { ...row, 布方面积: finalArea, status: '已回填', pending: false }
+  let remeasureNote = ''
+  if (remeasuredArea) {
+    const remeasuredBy = (payload.remeasuredBy ?? '').trim() || '现场记录员'
+    const remeasuredAt = new Date().toISOString().slice(0, 10)
+    if (updated['台账布方面积'] === undefined) {
+      updated['台账布方面积'] = ledgerArea
+    }
+    updated['复测布方面积'] = remeasuredArea
+    updated['复测人'] = remeasuredBy
+    updated['复测日期'] = remeasuredAt
+    updated['复测记录'] =
+      remeasuredArea === ledgerArea
+        ? `${remeasuredAt} ${remeasuredBy}现场复测：布方面积 ${remeasuredArea}，与台账一致，以现场复测为准`
+        : `${remeasuredAt} ${remeasuredBy}现场复测：台账 ${ledgerArea || '（缺失）'}，复测 ${remeasuredArea}，以现场复测为准，不再重算`
+    remeasureNote = '，复测记录已留存'
+  }
+  const next = [...rows]
+  next[index] = updated
+  saveRows('trench', next)
+  const todoCode = createAcceptanceTodo(updated)
+  return {
+    ok: true,
+    message: `探方 ${code} 已办理回填，当前状态「已回填」${remeasureNote}；验收待办单 ${todoCode} 已转到探方验收`,
+  }
+}
+
+// 回填收尾的批复落到探方验收：追加一张「待验收」待办单。
+function createAcceptanceTodo(trench: EntryRow): string {
+  const rows = listRows('acceptance')
+  const nextId = rows.reduce((max, row) => Math.max(max, Number(row.id) || 0), 0) + 1
+  const code = `ACCE-${String(nextId).padStart(4, '0')}`
+  const todo: EntryRow = {
+    id: nextId,
+    status: '待验收',
+    pending: true,
+    abnormal: false,
+    验收单号: code,
+    验收探方: String(trench['探方编号'] ?? ''),
+    验收类别: '回填验收',
+    验收人: '',
+    验收日期: '',
+    遗留问题数: 0,
+    验收结论: '',
+    验收状态: '待验收',
+  }
+  saveRows('acceptance', [...rows, todo])
+  return code
 }
 
 export function resetModule(key: string): PageResult {

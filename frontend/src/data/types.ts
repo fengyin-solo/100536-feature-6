@@ -17,6 +17,8 @@ export type ModuleMeta = {
   statuses: string[]
   actions: string[]
   actionTargets: Record<string, string>
+  // 动作的前置状态：登记了的动作只能从指定状态发起，状态逐段往下流转，不许跳级。
+  actionFrom?: Record<string, string>
   metrics: string[]
 }
 
